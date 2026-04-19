@@ -1,5 +1,7 @@
 # 🎮 Roblox Studio Ultimate MCP Server
 
+**English** | [日本語](README.ja.md)
+
 The most comprehensive MCP (Model Context Protocol) server for Roblox Studio. **41 tools** for complete Studio control from Claude Code or any MCP-compatible AI assistant.
 
 ## ✨ Why This Exists
