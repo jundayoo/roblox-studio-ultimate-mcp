@@ -9,13 +9,23 @@ import { readFile, unlink } from "fs/promises";
 import { tmpdir } from "os";
 import { join } from "path";
 
-const PROTOCOL_VERSION = 2;
-const SERVER_VERSION = "4.0.0";
+// ===== Config =====
+const CONFIG = {
+  protocolVersion: 2,
+  serverVersion: "5.1.0",
+  port: 3002,
+  host: "127.0.0.1",
+  commandTimeoutMs: 30_000,
+  requestBodyLimit: "50mb",
+  responseMaxBytes: 20 * 1024 * 1024, // 20MB
+};
+const PROTOCOL_VERSION = CONFIG.protocolVersion;
+const SERVER_VERSION = CONFIG.serverVersion;
 
 // ===== Studio Plugin との通信用 Express サーバー =====
 const app = express();
 app.use(cors({ origin: false })); // 外部ブラウザからのアクセスは許可しない
-app.use(express.json({ limit: "50mb" }));
+app.use(express.json({ limit: CONFIG.requestBodyLimit }));
 
 // ===== コマンドキュー（id 相関） =====
 interface PendingCommand {
@@ -69,7 +79,7 @@ function sendCommand(command: string, params: any = {}): Promise<any> {
       if (qIdx >= 0) commandQueue.splice(qIdx, 1);
       inflight.delete(id);
       reject(new Error(`Command timed out: ${command}`));
-    }, 30000);
+    }, CONFIG.commandTimeoutMs);
 
     commandQueue.push({
       id,
@@ -83,10 +93,8 @@ function sendCommand(command: string, params: any = {}): Promise<any> {
 }
 
 // 起動（localhost のみ）
-const PORT = 3002;
-const HOST = "127.0.0.1";
-const httpServer = app.listen(PORT, HOST, () => {
-  console.error(`[MCP Bridge] Listening on ${HOST}:${PORT} (v${SERVER_VERSION})`);
+const httpServer = app.listen(CONFIG.port, CONFIG.host, () => {
+  console.error(`[MCP Bridge] Listening on ${CONFIG.host}:${CONFIG.port} (v${SERVER_VERSION})`);
 });
 httpServer.on("error", (e) => {
   console.error(`[MCP Bridge] Listen failed: ${e.message}`);
@@ -108,6 +116,10 @@ const server = new McpServer({
   version: SERVER_VERSION,
 });
 
+// ===== Recording (v5.1) =====
+const recordings: Map<string, Array<{ name: string; params: any; time: number }>> = new Map();
+let currentRecording: string | null = null;
+
 // ツール登録ヘルパー
 function registerTool(
   name: string,
@@ -115,8 +127,17 @@ function registerTool(
   schema: any
 ) {
   server.tool(name, description, schema, (async (params: any) => {
+    // 記録中なら追加
+    if (currentRecording) {
+      const arr = recordings.get(currentRecording);
+      if (arr) arr.push({ name, params, time: Date.now() });
+    }
     const result = await sendCommand(name, params);
-    return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    let text = JSON.stringify(result, null, 2);
+    if (text.length > CONFIG.responseMaxBytes) {
+      text = text.slice(0, CONFIG.responseMaxBytes) + "\n...[TRUNCATED]";
+    }
+    return { content: [{ type: "text", text }] };
   }) as any);
 }
 
@@ -428,6 +449,86 @@ registerTool("getPerformanceStats", "FPS/メモリ/ネットワークなどパ�
 registerTool("suggestModelOptimizations", "モデル最適化提案（削除はしない）", {
   path: z.string().optional().describe("検査ルート（省略 game.Workspace）"),
 });
+
+// ----- v5.1 -----
+
+registerTool("undoLastMcpChange", "直近のMCP変更をN回巻き戻し（ChangeHistoryService）", {
+  count: z.number().optional().describe("巻き戻し回数（省略1）"),
+});
+
+registerTool("redoLastMcpChange", "巻き戻し取消（Redo）をN回", {
+  count: z.number().optional().describe("Redo回数（省略1）"),
+});
+
+registerTool("generateUIFromSpec", "JSONからScreenGui構造を自動生成", {
+  parent: z.string().optional().describe("親のパス（省略 game.StarterGui）"),
+  spec: z.any().describe("{ type, props:{}, children:[] } 形式"),
+});
+
+// Recording: クライアント（このMCP）側で記録
+server.tool(
+  "startRecording",
+  "今後のMCPコマンドを記録開始",
+  {
+    label: z.string().describe("記録名"),
+  },
+  (async ({ label }: { label: string }) => {
+    recordings.set(label, []);
+    currentRecording = label;
+    return { content: [{ type: "text" as const, text: JSON.stringify({ success: true, label }, null, 2) }] };
+  }) as any
+);
+
+server.tool(
+  "stopRecording",
+  "記録を停止",
+  {},
+  (async () => {
+    const wasRecording = currentRecording;
+    currentRecording = null;
+    const count = wasRecording ? recordings.get(wasRecording)?.length || 0 : 0;
+    return { content: [{ type: "text" as const, text: JSON.stringify({ success: true, label: wasRecording, count }, null, 2) }] };
+  }) as any
+);
+
+server.tool(
+  "listRecordings",
+  "記録済み一覧",
+  {},
+  (async () => {
+    const list = Array.from(recordings.entries()).map(([k, v]) => ({
+      label: k,
+      count: v.length,
+      first: v[0]?.time,
+      last: v[v.length - 1]?.time,
+    }));
+    return { content: [{ type: "text" as const, text: JSON.stringify({ recordings: list, active: currentRecording }, null, 2) }] };
+  }) as any
+);
+
+server.tool(
+  "replayRecording",
+  "記録を再生（全コマンドを順に送信）",
+  {
+    label: z.string().describe("記録名"),
+  },
+  (async ({ label }: { label: string }) => {
+    const recording = recordings.get(label);
+    if (!recording) {
+      return { content: [{ type: "text" as const, text: JSON.stringify({ error: "not found: " + label }, null, 2) }] };
+    }
+    const results: any[] = [];
+    for (const step of recording) {
+      try {
+        const r = await sendCommand(step.name, step.params);
+        results.push({ step: step.name, ok: true });
+      } catch (e: any) {
+        results.push({ step: step.name, ok: false, error: e.message });
+      }
+    }
+    return { content: [{ type: "text" as const, text: JSON.stringify({ label, steps: results.length, results }, null, 2) }] };
+  }) as any
+);
 
 // togglePlayMode: macOS keyboard shortcut 経由
 server.tool(

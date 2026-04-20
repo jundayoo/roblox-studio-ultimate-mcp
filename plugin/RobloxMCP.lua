@@ -1644,6 +1644,102 @@ handlers.suggestModelOptimizations = function(params)
     }
 end
 
+-- ===== v5.1 =====
+
+-- MCP の変更を巻き戻し（連続undo）
+handlers.undoLastMcpChange = writeGuarded(function(params)
+    local count = tonumber(params.count) or 1
+    local undone = 0
+    for i = 1, count do
+        local ok = pcall(function() ChangeHistoryService:Undo() end)
+        if ok then undone = undone + 1 else break end
+    end
+    return {success = true, undone = undone}
+end)
+
+handlers.redoLastMcpChange = writeGuarded(function(params)
+    local count = tonumber(params.count) or 1
+    local redone = 0
+    for i = 1, count do
+        local ok = pcall(function() ChangeHistoryService:Redo() end)
+        if ok then redone = redone + 1 else break end
+    end
+    return {success = true, redone = redone}
+end)
+
+-- JSON からGUI生成（簡易ReactのようなUI構築）
+-- spec: {type="Frame", props={Size=...}, children={...}}
+local function buildUI(spec, parent)
+    if type(spec) ~= "table" or not spec.type then return nil, "spec must have type" end
+    local ok, instance = pcall(Instance.new, spec.type)
+    if not ok then return nil, "Failed to create " .. tostring(spec.type) end
+
+    if spec.props then
+        for k, v in pairs(spec.props) do
+            pcall(function()
+                -- 型推論: "{0,100,0,50}" → UDim2, "255,100,50" + Color3フィールド名 → Color3
+                if type(v) == "string" then
+                    if v:match("^%s*[%{%(]") then
+                        -- Vector3/UDim2/CFrame 推定
+                        local stripped = v:gsub("[%{%(%)%}]", "")
+                        local parts = {}
+                        for n in stripped:gmatch("[^,]+") do table.insert(parts, tonumber(n:match("^%s*(.-)%s*$"))) end
+                        if #parts == 4 then instance[k] = UDim2.new(parts[1], parts[2], parts[3], parts[4])
+                        elseif #parts == 3 then instance[k] = Vector3.new(parts[1], parts[2], parts[3])
+                        elseif #parts == 2 then instance[k] = UDim.new(parts[1], parts[2])
+                        else instance[k] = v end
+                    elseif k:lower():find("color") then
+                        local stripped = v:gsub("[%{%(%)%}]", "")
+                        local parts = {}
+                        for n in stripped:gmatch("[^,]+") do table.insert(parts, tonumber(n:match("^%s*(.-)%s*$"))) end
+                        if #parts == 3 then
+                            local isRGB = false
+                            for _, n in ipairs(parts) do if n > 1 then isRGB = true end end
+                            instance[k] = isRGB and Color3.fromRGB(parts[1], parts[2], parts[3]) or Color3.new(parts[1], parts[2], parts[3])
+                        end
+                    else
+                        instance[k] = v
+                    end
+                else
+                    instance[k] = v
+                end
+            end)
+        end
+    end
+
+    if spec.children then
+        for _, childSpec in ipairs(spec.children) do
+            buildUI(childSpec, instance)
+        end
+    end
+
+    instance.Parent = parent
+    return instance, nil
+end
+
+handlers.generateUIFromSpec = writeGuarded(function(params)
+    local parent = getInstanceByPath(params.parent or "game.StarterGui")
+    if not parent then return {error = "Parent not found"} end
+    local spec = params.spec
+    if type(spec) ~= "table" then return {error = "spec must be a table"} end
+
+    local instance, err = buildUI(spec, parent)
+    if not instance then return {error = err} end
+    ChangeHistoryService:SetWaypoint("MCP: Generate UI")
+
+    local function countDesc(inst)
+        local c = 1
+        for _, ch in ipairs(inst:GetChildren()) do c = c + countDesc(ch) end
+        return c
+    end
+
+    return {
+        success = true,
+        path = getPathOfInstance(instance),
+        totalInstances = countDesc(instance),
+    }
+end)
+
 -- ===== ポーリングループ =====
 
 local running = true

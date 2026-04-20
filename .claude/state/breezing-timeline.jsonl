@@ -1,0 +1,6 @@
+{"event":"task_completed","teammate":"1","task_id":"Lua plugin 修正（C3,C4,C5,C6,I1,I2,I5,I6,I7,I11,I12,I13,M1）","subject":"plugin/RobloxMCP.lua の一括修正","description":"","timestamp":"2026-04-20T12:31:48Z"}
+{"event":"task_completed","teammate":"2","task_id":"TypeScript 修正（C1,C2,I4,I8,M11）","subject":"src/index.ts の queue化＋bind＋orphan登録＋tool metadata化","description":"","timestamp":"2026-04-20T12:32:52Z"}
+{"event":"task_completed","teammate":"3","task_id":"Plugin 再生成＋ビルド＋commit","subject":"generate-plugin.sh 実行、tsc ビルド、git commit/push、タグ v4.0","description":"","timestamp":"2026-04-20T12:34:53Z"}
+{"event":"task_completed","teammate":"4","task_id":"v4.1 Phase1機能追加（getOutput/captureScreen/watchAttribute）","subject":"Plugin + Server 両側追加、commit＆push、v4.1 タグ","description":"","timestamp":"2026-04-20T12:41:40Z"}
+{"event":"task_completed","teammate":"5","task_id":"v4.2 Phase2 機能追加（findPartsNear/bulkUpdate/snapshot/previewSetScript/togglePlay/改善）","subject":"Plugin + Server 両側実装＋残Minor修正＋リリース","description":"","timestamp":"2026-04-20T13:06:01Z"}
+{"event":"task_completed","teammate":"6","task_id":"v5.0 Everything - measure/batch/diff/collision/performance/minor fixes","subject":"全部入りリリース、Plugin+Server","description":"","timestamp":"2026-04-20T13:40:57Z"}

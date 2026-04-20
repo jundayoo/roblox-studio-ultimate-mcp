@@ -1,0 +1,38 @@
+{
+  "version": "1.0",
+  "updatedAt": "2026-04-20T12:21:11.671Z",
+  "skills": {
+    "requesting-code-review": {
+      "count": 1,
+      "lastUsed": "2026-04-20T12:21:11.670Z"
+    }
+  },
+  "commands": {
+    "var/folders/4n/z9ytrxbs0vl35k6fq8d27_280000gn/T/TemporaryItems/NSIRD_screencaptureui_qQ8LEy/": {
+      "count": 1,
+      "lastUsed": "2026-04-18T22:38:42.606Z"
+    },
+    "var/folders/4n/z9ytrxbs0vl35k6fq8d27_280000gn/T/TemporaryItems/NSIRD_screencaptureui_itovhu/": {
+      "count": 1,
+      "lastUsed": "2026-04-18T22:40:27.365Z"
+    },
+    "var/folders/4n/z9ytrxbs0vl35k6fq8d27_280000gn/T/TemporaryItems/NSIRD_screencaptureui_vb9WjE/": {
+      "count": 1,
+      "lastUsed": "2026-04-18T22:41:55.073Z"
+    },
+    "var/folders/4n/z9ytrxbs0vl35k6fq8d27_280000gn/T/TemporaryItems/NSIRD_screencaptureui_lDFi0a/": {
+      "count": 1,
+      "lastUsed": "2026-04-18T22:42:33.853Z"
+    },
+    "var/folders/4n/z9ytrxbs0vl35k6fq8d27_280000gn/T/TemporaryItems/NSIRD_screencaptureui_lOYHY3/": {
+      "count": 1,
+      "lastUsed": "2026-04-19T00:30:10.946Z"
+    },
+    "var/folders/4n/z9ytrxbs0vl35k6fq8d27_280000gn/T/TemporaryItems/NSIRD_screencaptureui_XbSlvE/": {
+      "count": 1,
+      "lastUsed": "2026-04-19T00:58:10.658Z"
+    }
+  },
+  "agents": {},
+  "hooks": {}
+}

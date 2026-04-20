@@ -1,0 +1,32 @@
+{
+  "Lua plugin 修正（C3,C4,C5,C6,I1,I2,I5,I6,I7,I11,I12,I13,M1）": {
+    "failure_count": 0,
+    "last_action": "reset",
+    "updated_at": "2026-04-20T12:31:48Z"
+  },
+  "TypeScript 修正（C1,C2,I4,I8,M11）": {
+    "failure_count": 0,
+    "last_action": "reset",
+    "updated_at": "2026-04-20T12:32:52Z"
+  },
+  "Plugin 再生成＋ビルド＋commit": {
+    "failure_count": 0,
+    "last_action": "reset",
+    "updated_at": "2026-04-20T12:34:53Z"
+  },
+  "v4.1 Phase1機能追加（getOutput/captureScreen/watchAttribute）": {
+    "failure_count": 0,
+    "last_action": "reset",
+    "updated_at": "2026-04-20T12:41:40Z"
+  },
+  "v4.2 Phase2 機能追加（findPartsNear/bulkUpdate/snapshot/previewSetScript/togglePlay/改善）": {
+    "failure_count": 0,
+    "last_action": "reset",
+    "updated_at": "2026-04-20T13:06:01Z"
+  },
+  "v5.0 Everything - measure/batch/diff/collision/performance/minor fixes": {
+    "failure_count": 0,
+    "last_action": "reset",
+    "updated_at": "2026-04-20T13:40:57Z"
+  }
+}

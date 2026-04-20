@@ -1,0 +1,4 @@
+{"event":"subagent_start","timestamp":"2026-04-20T12:21:42Z","agent_id":"unknown"}
+{"event":"subagent_stop","timestamp":"2026-04-20T12:26:35Z","agent_id":"unknown","transcript_path":"","transcript_preview":""}
+{"event":"subagent_stop","timestamp":"2026-04-20T12:49:24Z","agent_id":"unknown","transcript_path":"","transcript_preview":""}
+{"event":"subagent_stop","timestamp":"2026-04-20T13:14:40Z","agent_id":"unknown","transcript_path":"","transcript_preview":""}
