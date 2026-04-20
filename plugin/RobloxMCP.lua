@@ -91,13 +91,21 @@ end)
 
 -- ===== ユーティリティ =====
 
--- パス → Instance（"game.X.Y" 形式。先頭 game はオプション）
+-- パス → Instance（"game.X.Y" 形式。先頭 game はオプション、Service対応）
 local function getInstanceByPath(path)
     if not path or path == "" then return nil end
     local parts = string.split(path, ".")
     local current = game
     for i, part in ipairs(parts) do
         if i == 1 and part == "game" then continue end
+        -- 最初の Service 解決は GetService 経由
+        if current == game then
+            local ok, svc = pcall(function() return game:GetService(part) end)
+            if ok and svc then
+                current = svc
+                continue
+            end
+        end
         current = current:FindFirstChild(part)
         if not current then return nil end
     end
@@ -763,9 +771,14 @@ handlers.findInstances = function(params)
     return {results = results, count = #results}
 end
 
--- バッチコマンド（per-command pcall）
+-- バッチコマンド（per-command pcall + ChangeHistory グループ化）
 handlers.batch = function(params)
     local results = {}
+    local cmdCount = #(params.commands or {})
+    local recordOk, recordId = pcall(function()
+        return ChangeHistoryService:TryBeginRecording("MCP: Batch (" .. cmdCount .. " commands)")
+    end)
+
     for i, cmd in ipairs(params.commands or {}) do
         local handler = handlers[cmd.command]
         if handler then
@@ -774,6 +787,10 @@ handlers.batch = function(params)
         else
             results[i] = {error = "Unknown command: " .. tostring(cmd.command)}
         end
+    end
+
+    if recordOk and recordId then
+        pcall(function() ChangeHistoryService:FinishRecording(recordId, Enum.FinishRecordingOperation.Commit) end)
     end
     return {results = results, count = #results}
 end
@@ -846,10 +863,12 @@ handlers.getFunctionList = function(params)
     local functions = {}
     local lines = splitLines(instance.Source)
     for i, line in ipairs(lines) do
+        -- `function ModName.foo(`, `function Mod:foo(`
         local fname = line:match("^%s*function%s+([%w_%.%:]+)%s*%(")
             or line:match("^%s*local%s+function%s+([%w_]+)%s*%(")
-            or line:match("^%s*([%w_]+)%s*=%s*function%s*%(")
-            or line:match("^%s*([%w_%.]+)%s*=%s*function%s*%(")
+            -- `foo = function(`, `M.foo = function(`, `M:foo = function(` など
+            or line:match("^%s*([%w_%.%:]+)%s*=%s*function%s*%(")
+            or line:match("^%s*local%s+([%w_]+)%s*=%s*function%s*%(")
         if fname then
             table.insert(functions, {name = fname, line = i})
         end
@@ -1123,6 +1142,270 @@ handlers.getChildren = function(params)
         })
     end
     return {children = children, count = #children}
+end
+
+-- ===== v4.2 Phase 2 =====
+
+-- 座標近傍のパーツ検索
+handlers.findPartsNear = function(params)
+    local px = tonumber(params.x) or 0
+    local py = tonumber(params.y) or 0
+    local pz = tonumber(params.z) or 0
+    local center = Vector3.new(px, py, pz)
+    local radius = tonumber(params.radius) or 10
+    local root = params.root and getInstanceByPath(params.root) or workspace
+
+    local filterName = params.name  -- 部分一致
+    local filterClass = params.className
+    local filterCanCollide = params.canCollide  -- true/false/nil
+    local filterMinSizeY = tonumber(params.minSizeY)  -- 壁検出用
+    local limit = tonumber(params.limit) or 50
+
+    local hits = {}
+    for _, d in ipairs(root:GetDescendants()) do
+        if d:IsA("BasePart") then
+            local dist = (d.Position - center).Magnitude
+            if dist <= radius then
+                local match = true
+                if filterName and not d.Name:lower():find(filterName:lower(), 1, true) then match = false end
+                if filterClass and d.ClassName ~= filterClass then match = false end
+                if filterCanCollide ~= nil and d.CanCollide ~= filterCanCollide then match = false end
+                if filterMinSizeY and d.Size.Y < filterMinSizeY then match = false end
+                if match then
+                    table.insert(hits, {
+                        path = getPathOfInstance(d),
+                        name = d.Name,
+                        className = d.ClassName,
+                        dist = math.floor(dist * 100) / 100,
+                        pos = tostring(d.Position),
+                        size = tostring(d.Size),
+                        canCollide = d.CanCollide,
+                        transparency = d.Transparency,
+                    })
+                end
+            end
+        end
+    end
+    table.sort(hits, function(a, b) return a.dist < b.dist end)
+    if #hits > limit then
+        for i = limit + 1, #hits do hits[i] = nil end
+    end
+    return {results = hits, count = #hits, center = tostring(center), radius = radius}
+end
+
+-- 複数プロパティを複数インスタンスに一括設定
+handlers.bulkUpdate = writeGuarded(function(params)
+    local updates = params.updates or {}
+    local success, failed = 0, {}
+    local recordOk, recordId = pcall(function()
+        return ChangeHistoryService:TryBeginRecording("MCP: Bulk Update (" .. #updates .. ")")
+    end)
+
+    for _, u in ipairs(updates) do
+        local inst = getInstanceByPath(u.path)
+        if not inst then
+            table.insert(failed, {path = u.path, reason = "not found"})
+        else
+            for prop, val in pairs(u.props or {}) do
+                local ok, err = pcall(function() inst[prop] = val end)
+                if ok then
+                    success = success + 1
+                else
+                    table.insert(failed, {path = u.path, prop = prop, reason = tostring(err)})
+                end
+            end
+        end
+    end
+
+    if recordOk and recordId then
+        pcall(function() ChangeHistoryService:FinishRecording(recordId, Enum.FinishRecordingOperation.Commit) end)
+    else
+        ChangeHistoryService:SetWaypoint("MCP: Bulk Update")
+    end
+
+    return {success = success, failed = failed, failCount = #failed}
+end)
+
+-- Workspace のスナップショット（diff 用）
+local snapshots = {}
+local function snapshotTree(root, depth, currentDepth)
+    currentDepth = currentDepth or 0
+    local data = {
+        name = root.Name,
+        className = root.ClassName,
+        childCount = #root:GetChildren(),
+    }
+    if root:IsA("BasePart") then
+        data.pos = tostring(root.Position)
+        data.size = tostring(root.Size)
+    end
+    if currentDepth < depth then
+        data.children = {}
+        for _, c in ipairs(root:GetChildren()) do
+            data.children[c.Name .. ":" .. c.ClassName] = snapshotTree(c, depth, currentDepth + 1)
+        end
+    end
+    return data
+end
+
+handlers.snapshot = function(params)
+    local label = params.label or "default"
+    local rootPath = params.root or "game.Workspace"
+    local root = getInstanceByPath(rootPath)
+    if not root then return {error = "Root not found: " .. rootPath} end
+    local depth = tonumber(params.depth) or 3
+    snapshots[label] = {
+        tree = snapshotTree(root, depth),
+        root = rootPath,
+        depth = depth,
+        time = os.time(),
+    }
+    return {success = true, label = label, root = rootPath, depth = depth}
+end
+
+-- 2つのスナップショット or 現在との diff
+local function diffTrees(a, b, path)
+    path = path or ""
+    local diffs = {}
+    if not a and b then
+        table.insert(diffs, {op = "added", path = path, className = b.className})
+        return diffs
+    elseif a and not b then
+        table.insert(diffs, {op = "removed", path = path, className = a.className})
+        return diffs
+    end
+    if a.className ~= b.className then
+        table.insert(diffs, {op = "classChanged", path = path, from = a.className, to = b.className})
+    end
+    if a.pos ~= b.pos then
+        table.insert(diffs, {op = "moved", path = path, from = a.pos, to = b.pos})
+    end
+    if a.size ~= b.size then
+        table.insert(diffs, {op = "resized", path = path, from = a.size, to = b.size})
+    end
+    local aChildren = a.children or {}
+    local bChildren = b.children or {}
+    local keys = {}
+    for k in pairs(aChildren) do keys[k] = true end
+    for k in pairs(bChildren) do keys[k] = true end
+    for k in pairs(keys) do
+        local childPath = path == "" and k or (path .. "/" .. k)
+        local subDiffs = diffTrees(aChildren[k], bChildren[k], childPath)
+        for _, d in ipairs(subDiffs) do table.insert(diffs, d) end
+    end
+    return diffs
+end
+
+handlers.diffFromSnapshot = function(params)
+    local label = params.label or "default"
+    local old = snapshots[label]
+    if not old then return {error = "No snapshot with label: " .. label} end
+    local root = getInstanceByPath(old.root)
+    if not root then return {error = "Root no longer exists: " .. old.root} end
+    local current = snapshotTree(root, old.depth)
+    local diffs = diffTrees(old.tree, current, old.root)
+    return {diffs = diffs, count = #diffs, snapshotTime = old.time, now = os.time()}
+end
+
+handlers.listSnapshots = function()
+    local list = {}
+    for k, s in pairs(snapshots) do
+        table.insert(list, {label = k, root = s.root, depth = s.depth, time = s.time})
+    end
+    return {snapshots = list, count = #list}
+end
+
+-- setScript プレビュー (diff表示、書き込みなし)
+handlers.previewSetScript = function(params)
+    local instance = getInstanceByPath(params.path)
+    if not instance then return {error = "Instance not found"} end
+    if not instance:IsA("LuaSourceContainer") then return {error = "Not a script"} end
+
+    local old = splitLines(instance.Source)
+    local new = splitLines(params.source)
+
+    -- 簡易 line diff (LCS ベースの最小版)
+    local diff = {}
+    local maxLen = math.max(#old, #new)
+    local changed, added, removed = 0, 0, 0
+    for i = 1, maxLen do
+        if old[i] == nil then
+            table.insert(diff, {op = "add", line = i, content = new[i]})
+            added = added + 1
+        elseif new[i] == nil then
+            table.insert(diff, {op = "del", line = i, content = old[i]})
+            removed = removed + 1
+        elseif old[i] ~= new[i] then
+            table.insert(diff, {op = "change", line = i, from = old[i], to = new[i]})
+            changed = changed + 1
+        end
+    end
+
+    local syntaxResult = checkSyntax(params.source)
+    return {
+        diff = diff,
+        stats = {changed = changed, added = added, removed = removed},
+        oldLineCount = #old,
+        newLineCount = #new,
+        syntaxValid = syntaxResult.valid,
+        syntaxError = syntaxResult.error,
+    }
+end
+
+-- RemoteEvent の引数ログ（既存 RemoteEvent にフック）
+local remoteEventLog = {}
+local MAX_REMOTE_LOG = 100
+local hookedRemotes = setmetatable({}, {__mode = "k"})
+
+local function hookRemote(rem)
+    if hookedRemotes[rem] then return end
+    hookedRemotes[rem] = true
+    if rem:IsA("RemoteEvent") then
+        -- クライアント→サーバー (サーバー側で受信)
+        rem.OnServerEvent:Connect(function(player, ...)
+            table.insert(remoteEventLog, {
+                time = os.time(),
+                name = rem.Name,
+                path = getPathOfInstance(rem),
+                direction = "C2S",
+                player = player.Name,
+                args = table.pack(...),
+            })
+            if #remoteEventLog > MAX_REMOTE_LOG then table.remove(remoteEventLog, 1) end
+        end)
+    end
+end
+
+handlers.inspectRemoteEvents = function(params)
+    -- 既存 RemoteEvent を全部フック
+    for _, d in ipairs(game:GetDescendants()) do
+        if d:IsA("RemoteEvent") then hookRemote(d) end
+    end
+    -- ログ取得
+    local count = params.count or 20
+    local recent = {}
+    local start = math.max(1, #remoteEventLog - count + 1)
+    for i = start, #remoteEventLog do
+        local e = remoteEventLog[i]
+        table.insert(recent, {
+            time = e.time,
+            name = e.name,
+            path = e.path,
+            direction = e.direction,
+            player = e.player,
+            argCount = e.args and e.args.n or 0,
+            args = e.args and table.concat((function()
+                local s = {}
+                for i = 1, e.args.n do s[i] = tostring(e.args[i]):sub(1, 50) end
+                return s
+            end)(), ", ") or "",
+        })
+    end
+    return {events = recent, count = #recent, totalBuffered = #remoteEventLog, hookedCount = #(function()
+        local c = {}
+        for r in pairs(hookedRemotes) do table.insert(c, r) end
+        return c
+    end)()}
 end
 
 -- ===== ポーリングループ =====

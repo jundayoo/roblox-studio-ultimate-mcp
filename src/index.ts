@@ -338,6 +338,74 @@ registerTool("watchAttribute", "Attribute取得（Play中フラグ付き）", {
   attribute: z.string().describe("Attribute名"),
 });
 
+// ----- v4.2 Phase 2 -----
+
+registerTool("findPartsNear", "座標近傍のパーツ検索", {
+  x: z.number().describe("中心X"),
+  y: z.number().describe("中心Y"),
+  z: z.number().describe("中心Z"),
+  radius: z.number().optional().describe("検索半径（省略10）"),
+  name: z.string().optional().describe("名前で部分一致"),
+  className: z.string().optional().describe("クラス名で完全一致"),
+  canCollide: z.boolean().optional().describe("CanCollide フィルタ"),
+  minSizeY: z.number().optional().describe("最低Y高さ（壁検出用）"),
+  root: z.string().optional().describe("検索ルート（省略 workspace）"),
+  limit: z.number().optional().describe("最大件数（省略50）"),
+});
+
+registerTool("bulkUpdate", "複数インスタンスのプロパティを一括設定（ChangeHistory グループ化）", {
+  updates: z.array(z.object({
+    path: z.string(),
+    props: z.record(z.string(), z.any()),
+  })).describe("[{path, props: {propName: value}}, ...]"),
+});
+
+registerTool("snapshot", "Workspace ツリーのスナップショットを保存", {
+  label: z.string().optional().describe("スナップショット名（省略default）"),
+  root: z.string().optional().describe("ルートパス（省略 game.Workspace）"),
+  depth: z.number().optional().describe("探索深度（省略3）"),
+});
+
+registerTool("diffFromSnapshot", "スナップショットからの差分検出", {
+  label: z.string().optional().describe("スナップショット名"),
+});
+
+registerTool("listSnapshots", "保存済みスナップショット一覧", {});
+
+registerTool("previewSetScript", "setScript の差分プレビュー（書き込みなし）", {
+  path: z.string().describe("スクリプトのパス"),
+  source: z.string().describe("新しいソース"),
+});
+
+registerTool("inspectRemoteEvents", "RemoteEvent の送受信ログ（初回呼出で全RemoteEventにフック）", {
+  count: z.number().optional().describe("取得件数"),
+});
+
+// togglePlayMode: macOS keyboard shortcut 経由
+server.tool(
+  "togglePlayMode",
+  "Roblox Studio の Play/Stop 切替 (macOS osascript 経由、アクセシビリティ権限必要)",
+  {
+    action: z.enum(["play", "stop"]).describe("play=F5、stop=Shift+F5"),
+  },
+  (async ({ action }: { action: string }) => {
+    try {
+      await runOsascript(`tell application "RobloxStudio" to activate`);
+      await new Promise((r) => setTimeout(r, 200));
+      // key code 96 = F5
+      const modifier = action === "stop" ? "using {shift down}" : "";
+      await runOsascript(`tell application "System Events" to key code 96 ${modifier}`);
+      return {
+        content: [{ type: "text" as const, text: JSON.stringify({ success: true, action }, null, 2) }],
+      };
+    } catch (e: any) {
+      return {
+        content: [{ type: "text" as const, text: `Error: ${e.message}\nHint: システム環境設定 > セキュリティとプライバシー > アクセシビリティ で Claude/ターミナルを許可` }],
+      };
+    }
+  }) as any
+);
+
 // Screenshot は Node 側で実行（macOS screencapture）
 async function runOsascript(script: string): Promise<string> {
   return new Promise((resolve, reject) => {
