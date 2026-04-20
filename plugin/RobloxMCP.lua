@@ -65,20 +65,27 @@ local plugin = plugin or script:FindFirstAncestorOfClass("Plugin")
 local backupHistory = setmetatable({}, {__mode = "k"})
 local MAX_BACKUPS = 10
 
--- ===== エラーログバッファ =====
-local errorBuffer = {}
-local MAX_ERRORS = 50
+-- ===== ログバッファ（全タイプ、Play中も捕捉）=====
+local logBuffer = {}
+local MAX_LOG = 500
+
+local function typeToLevel(mt)
+    if mt == Enum.MessageType.MessageError then return "error" end
+    if mt == Enum.MessageType.MessageWarning then return "warn" end
+    if mt == Enum.MessageType.MessageInfo then return "info" end
+    return "output"
+end
 
 LogService.MessageOut:Connect(function(message, messageType)
-    if messageType == Enum.MessageType.MessageError or messageType == Enum.MessageType.MessageWarning then
-        table.insert(errorBuffer, {
-            message = message,
-            type = tostring(messageType),
-            time = os.time(),
-        })
-        if #errorBuffer > MAX_ERRORS then
-            table.remove(errorBuffer, 1)
-        end
+    table.insert(logBuffer, {
+        message = message,
+        level = typeToLevel(messageType),
+        type = tostring(messageType),
+        time = os.time(),
+        duringPlay = RunService:IsRunning(),
+    })
+    if #logBuffer > MAX_LOG then
+        table.remove(logBuffer, 1)
     end
 end)
 
@@ -433,20 +440,70 @@ handlers.searchInScripts = function(params)
     return {results = results, count = #results, query = query}
 end
 
--- エラーログ
+-- エラーログ（error/warn のみ）
 handlers.getErrors = function(params)
-    local count = params.count or MAX_ERRORS
-    local recent = {}
-    local start = math.max(1, #errorBuffer - count + 1)
-    for i = start, #errorBuffer do
-        table.insert(recent, errorBuffer[i])
+    local count = params.count or 50
+    local filtered = {}
+    for _, e in ipairs(logBuffer) do
+        if e.level == "error" or e.level == "warn" then
+            table.insert(filtered, e)
+        end
     end
-    return {errors = recent, count = #recent, totalBuffered = #errorBuffer}
+    local recent = {}
+    local start = math.max(1, #filtered - count + 1)
+    for i = start, #filtered do
+        table.insert(recent, filtered[i])
+    end
+    return {errors = recent, count = #recent, totalBuffered = #filtered}
 end
 
 handlers.clearErrors = function()
-    errorBuffer = {}
+    logBuffer = {}
     return {success = true}
+end
+
+-- 全ログ取得（Play中も含む、info/output も）
+handlers.getOutput = function(params)
+    local count = params.count or 200
+    local levelFilter = params.levelFilter  -- "error", "warn", "info", "output" or nil
+    local sinceTime = params.sinceTime  -- os.time ベース
+    local onlyPlay = params.onlyPlay  -- trueならPlay中のみ
+
+    local filtered = {}
+    for _, e in ipairs(logBuffer) do
+        if levelFilter and e.level ~= levelFilter then continue end
+        if sinceTime and e.time < sinceTime then continue end
+        if onlyPlay and not e.duringPlay then continue end
+        table.insert(filtered, e)
+    end
+
+    local recent = {}
+    local start = math.max(1, #filtered - count + 1)
+    for i = start, #filtered do
+        table.insert(recent, filtered[i])
+    end
+    return {
+        output = recent,
+        count = #recent,
+        totalBuffered = #logBuffer,
+        latestTime = #logBuffer > 0 and logBuffer[#logBuffer].time or 0,
+    }
+end
+
+-- Play中の属性取得（Edit/Play両対応）
+handlers.watchAttribute = function(params)
+    local instance = getInstanceByPath(params.path)
+    if not instance then return {error = "Instance not found"} end
+    local val = instance:GetAttribute(params.attribute)
+    return {
+        path = params.path,
+        attribute = params.attribute,
+        value = val,
+        valueString = tostring(val),
+        type = typeof(val),
+        isRunning = RunService:IsRunning(),
+        note = RunService:IsRunning() and "Plugin sees edit DataModel; Play-only attributes may not reflect here" or nil,
+    }
 end
 
 -- インスタンスツリー取得

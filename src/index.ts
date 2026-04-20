@@ -4,6 +4,10 @@ import { z } from "zod";
 import express from "express";
 import cors from "cors";
 import { randomUUID } from "crypto";
+import { execFile } from "child_process";
+import { readFile, unlink } from "fs/promises";
+import { tmpdir } from "os";
+import { join } from "path";
 
 const PROTOCOL_VERSION = 2;
 const SERVER_VERSION = "4.0.0";
@@ -319,6 +323,56 @@ registerTool("setSelection", "選択を設定", {
   paths: z.array(z.string()).describe("選択するパスの配列"),
 });
 registerTool("getStudioInfo", "Studio情報を取得（mode/version等）", {});
+
+// ----- v4.1 Phase1 機能 -----
+
+registerTool("getOutput", "Studioの出力ログ（print/warn/error、Play中含む）を取得", {
+  count: z.number().optional().describe("取得件数（省略で200）"),
+  levelFilter: z.string().optional().describe("フィルタ (error/warn/info/output)"),
+  sinceTime: z.number().optional().describe("この時刻以降（os.time()基準）"),
+  onlyPlay: z.boolean().optional().describe("Play中のログのみ"),
+});
+
+registerTool("watchAttribute", "Attribute取得（Play中フラグ付き）", {
+  path: z.string().describe("インスタンスのパス"),
+  attribute: z.string().describe("Attribute名"),
+});
+
+// Screenshot は Node 側で実行（macOS screencapture）
+server.tool(
+  "captureScreen",
+  "macOSスクリーンショット取得（フルスクリーン or アクティブウィンドウ）",
+  {
+    mode: z.enum(["full", "interactive", "window"]).optional().describe("full=画面全体、interactive=範囲選択、window=アクティブウィンドウ"),
+  },
+  (async ({ mode }: { mode?: string }) => {
+    const m = mode || "full";
+    const tmpPath = join(tmpdir(), `roblox-mcp-${randomUUID()}.png`);
+
+    const args: string[] = ["-x"];
+    if (m === "interactive") args.push("-i");
+    else if (m === "window") args.push("-w");
+    args.push(tmpPath);
+
+    try {
+      await new Promise<void>((resolve, reject) => {
+        execFile("screencapture", args, (err) => (err ? reject(err) : resolve()));
+      });
+      const buf = await readFile(tmpPath);
+      await unlink(tmpPath).catch(() => {});
+      const base64 = buf.toString("base64");
+      return {
+        content: [
+          { type: "image" as const, data: base64, mimeType: "image/png" },
+        ],
+      };
+    } catch (e: any) {
+      return {
+        content: [{ type: "text" as const, text: `Error: ${e.message}` }],
+      };
+    }
+  }) as any
+);
 
 // ===== 起動 =====
 async function main() {
