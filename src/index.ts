@@ -339,25 +339,56 @@ registerTool("watchAttribute", "Attribute取得（Play中フラグ付き）", {
 });
 
 // Screenshot は Node 側で実行（macOS screencapture）
+async function runOsascript(script: string): Promise<string> {
+  return new Promise((resolve, reject) => {
+    execFile("osascript", ["-e", script], (err, stdout) => {
+      if (err) reject(err);
+      else resolve(stdout.trim());
+    });
+  });
+}
+
 server.tool(
   "captureScreen",
-  "macOSスクリーンショット取得（フルスクリーン or アクティブウィンドウ）",
+  "スクショ取得 (studio=Robloxのみ、full=全画面、window=アクティブ、interactive=選択)",
   {
-    mode: z.enum(["full", "interactive", "window"]).optional().describe("full=画面全体、interactive=範囲選択、window=アクティブウィンドウ"),
+    mode: z.enum(["studio", "full", "interactive", "window"]).optional().describe("デフォルト: studio"),
   },
   (async ({ mode }: { mode?: string }) => {
-    const m = mode || "full";
+    const m = mode || "studio";
     const tmpPath = join(tmpdir(), `roblox-mcp-${randomUUID()}.png`);
 
-    const args: string[] = ["-x"];
-    if (m === "interactive") args.push("-i");
-    else if (m === "window") args.push("-w");
-    args.push(tmpPath);
-
     try {
-      await new Promise<void>((resolve, reject) => {
-        execFile("screencapture", args, (err) => (err ? reject(err) : resolve()));
-      });
+      if (m === "studio") {
+        // Roblox Studio を前面に出してから window IDで直接キャプチャ
+        await runOsascript(`tell application "RobloxStudio" to activate`).catch(() => {});
+        await new Promise((r) => setTimeout(r, 150));
+        // System Events で最前面ウィンドウ位置/サイズを取得
+        const bounds = await runOsascript(`
+          tell application "System Events"
+            tell process "RobloxStudio"
+              set pos to position of front window
+              set sz to size of front window
+              return (item 1 of pos as string) & "," & (item 2 of pos as string) & "," & (item 1 of sz as string) & "," & (item 2 of sz as string)
+            end tell
+          end tell
+        `);
+        const [x, y, w, h] = bounds.split(",").map((s) => parseInt(s.trim(), 10));
+        await new Promise<void>((resolve, reject) => {
+          execFile("screencapture", ["-x", "-R", `${x},${y},${w},${h}`, tmpPath], (err) =>
+            err ? reject(err) : resolve()
+          );
+        });
+      } else {
+        const args: string[] = ["-x"];
+        if (m === "interactive") args.push("-i");
+        else if (m === "window") args.push("-w");
+        args.push(tmpPath);
+        await new Promise<void>((resolve, reject) => {
+          execFile("screencapture", args, (err) => (err ? reject(err) : resolve()));
+        });
+      }
+
       const buf = await readFile(tmpPath);
       await unlink(tmpPath).catch(() => {});
       const base64 = buf.toString("base64");
