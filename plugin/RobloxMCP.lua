@@ -1408,6 +1408,242 @@ handlers.inspectRemoteEvents = function(params)
     end)()}
 end
 
+-- ===== v5.0 Measurement / Batch / Diff / Collision / Performance =====
+
+-- 2点間の距離測定
+handlers.measureDistance = function(params)
+    local a = getInstanceByPath(params.pathA)
+    local b = getInstanceByPath(params.pathB)
+    if not a or not b then return {error = "One or both instances not found"} end
+    local posA = a:IsA("BasePart") and a.Position or (a.PrimaryPart and a.PrimaryPart.Position)
+    local posB = b:IsA("BasePart") and b.Position or (b.PrimaryPart and b.PrimaryPart.Position)
+    if not posA or not posB then return {error = "Cannot determine position"} end
+    return {
+        distance = (posA - posB).Magnitude,
+        posA = tostring(posA),
+        posB = tostring(posB),
+        delta = tostring(posA - posB),
+    }
+end
+
+-- モデルのバウンディングボックス
+handlers.measureBounds = function(params)
+    local root = getInstanceByPath(params.path)
+    if not root then return {error = "Instance not found"} end
+
+    local parts = {}
+    if root:IsA("BasePart") then
+        table.insert(parts, root)
+    else
+        for _, d in ipairs(root:GetDescendants()) do
+            if d:IsA("BasePart") then table.insert(parts, d) end
+        end
+    end
+    if #parts == 0 then return {error = "No BaseParts found"} end
+
+    local minV = Vector3.new(math.huge, math.huge, math.huge)
+    local maxV = Vector3.new(-math.huge, -math.huge, -math.huge)
+    for _, p in ipairs(parts) do
+        local pos, size = p.Position, p.Size
+        local half = size / 2
+        minV = Vector3.new(math.min(minV.X, pos.X - half.X), math.min(minV.Y, pos.Y - half.Y), math.min(minV.Z, pos.Z - half.Z))
+        maxV = Vector3.new(math.max(maxV.X, pos.X + half.X), math.max(maxV.Y, pos.Y + half.Y), math.max(maxV.Z, pos.Z + half.Z))
+    end
+    local size = maxV - minV
+    return {
+        min = tostring(minV),
+        max = tostring(maxV),
+        center = tostring((minV + maxV) / 2),
+        size = tostring(size),
+        volume = size.X * size.Y * size.Z,
+        partCount = #parts,
+    }
+end
+
+-- 複数コード連続実行
+handlers.batchRunCode = function(params)
+    local snippets = params.snippets or {}
+    local results = {}
+    for i, code in ipairs(snippets) do
+        local ok, res = pcall(handlers.runCode, {code = code})
+        results[i] = ok and res or {error = "Handler error: " .. tostring(res)}
+    end
+    return {results = results, count = #results}
+end
+
+-- バックアップ2つの diff
+handlers.diffBackup = function(params)
+    local instance = getInstanceByPath(params.path)
+    if not instance then return {error = "Instance not found"} end
+    local history = backupHistory[instance]
+    if not history or #history < 2 then
+        return {error = "Need at least 2 backups; currently " .. (history and #history or 0)}
+    end
+
+    local idxA = params.indexA or (#history - 1)
+    local idxB = params.indexB or #history
+    local a = history[idxA]
+    local b = history[idxB]
+    if not a or not b then return {error = "Backup index out of range"} end
+
+    local oldLines = splitLines(a.source)
+    local newLines = splitLines(b.source)
+    local diff = {}
+    local changed, added, removed = 0, 0, 0
+    local maxLen = math.max(#oldLines, #newLines)
+    for i = 1, maxLen do
+        if oldLines[i] == nil then
+            table.insert(diff, {op = "add", line = i, content = newLines[i]}); added = added + 1
+        elseif newLines[i] == nil then
+            table.insert(diff, {op = "del", line = i, content = oldLines[i]}); removed = removed + 1
+        elseif oldLines[i] ~= newLines[i] then
+            table.insert(diff, {op = "change", line = i, from = oldLines[i], to = newLines[i]}); changed = changed + 1
+        end
+    end
+    return {
+        diff = diff,
+        stats = {changed = changed, added = added, removed = removed},
+        indexA = idxA, indexB = idxB,
+        timeA = a.timestamp, timeB = b.timestamp,
+    }
+end
+
+-- 関数キーワード セマンティック検索
+handlers.suggestFunctionLocation = function(params)
+    local keyword = params.keyword
+    if not keyword or keyword == "" then return {error = "keyword required"} end
+
+    local results = {}
+    local function scan(parent)
+        for _, child in ipairs(parent:GetChildren()) do
+            if child:IsA("LuaSourceContainer") then
+                local lines = splitLines(child.Source)
+                for i, line in ipairs(lines) do
+                    local fname = line:match("^%s*function%s+([%w_%.%:]+)%s*%(")
+                        or line:match("^%s*local%s+function%s+([%w_]+)%s*%(")
+                        or line:match("^%s*([%w_%.%:]+)%s*=%s*function%s*%(")
+                    if fname and fname:lower():find(keyword:lower(), 1, true) then
+                        -- 関数の周辺コンテキストも添える
+                        local contextLines = {}
+                        for j = i, math.min(i + 5, #lines) do
+                            table.insert(contextLines, lines[j])
+                        end
+                        table.insert(results, {
+                            path = getPathOfInstance(child),
+                            scriptName = child.Name,
+                            functionName = fname,
+                            line = i,
+                            preview = table.concat(contextLines, "\n"):sub(1, 300),
+                        })
+                    end
+                end
+            end
+            scan(child)
+        end
+    end
+    scan(game)
+    return {results = results, count = #results, keyword = keyword}
+end
+
+-- Collision Groups
+handlers.listCollisionGroups = function()
+    local PS = game:GetService("PhysicsService")
+    local groups = PS:GetRegisteredCollisionGroups()
+    local result = {}
+    for _, g in ipairs(groups) do
+        table.insert(result, {id = g.id, name = g.name, mask = g.mask})
+    end
+    return {groups = result, count = #result}
+end
+
+handlers.createCollisionGroup = writeGuarded(function(params)
+    local PS = game:GetService("PhysicsService")
+    local ok, err = pcall(function() PS:RegisterCollisionGroup(params.name) end)
+    if not ok then return {error = tostring(err)} end
+    return {success = true, name = params.name}
+end)
+
+handlers.setPartCollisionGroup = writeGuarded(function(params)
+    local instance = getInstanceByPath(params.path)
+    if not instance or not instance:IsA("BasePart") then return {error = "Not a BasePart"} end
+    instance.CollisionGroup = params.groupName
+    ChangeHistoryService:SetWaypoint("MCP: Set CollisionGroup")
+    return {success = true}
+end)
+
+handlers.setCollisionGroupCollidable = writeGuarded(function(params)
+    local PS = game:GetService("PhysicsService")
+    local ok, err = pcall(function() PS:CollisionGroupSetCollidable(params.groupA, params.groupB, params.collidable) end)
+    if not ok then return {error = tostring(err)} end
+    return {success = true}
+end)
+
+-- パフォーマンス統計
+handlers.getPerformanceStats = function()
+    local Stats = game:GetService("Stats")
+    local data = {
+        time = os.time(),
+    }
+    pcall(function()
+        data.physicsFPS = math.floor(workspace:GetRealPhysicsFPS())
+    end)
+    pcall(function()
+        data.heartbeatTime = Stats.HeartbeatTimeMs:GetValue()
+    end)
+    pcall(function()
+        data.dataSendKBps = Stats.DataSendKbps:GetValue()
+        data.dataReceiveKBps = Stats.DataReceiveKbps:GetValue()
+    end)
+    pcall(function()
+        data.memoryMB = math.floor(Stats:GetTotalMemoryUsageMb())
+    end)
+    pcall(function()
+        local itemCount = 0
+        for _ in pairs(game:GetDescendants()) do itemCount = itemCount + 1 end
+        data.instanceCount = itemCount
+    end)
+    return data
+end
+
+-- Model 最適化の提案（削除はしない、提案のみ）
+handlers.suggestModelOptimizations = function(params)
+    local root = getInstanceByPath(params.path or "game.Workspace")
+    if not root then return {error = "Root not found"} end
+
+    local transparentInvisible = 0
+    local zeroSized = 0
+    local duplicateNames = {}
+    local nameCount = {}
+
+    for _, d in ipairs(root:GetDescendants()) do
+        if d:IsA("BasePart") then
+            if d.Transparency >= 1 and not d.CanCollide and not d.CanQuery then
+                transparentInvisible = transparentInvisible + 1
+            end
+            if d.Size.X < 0.1 and d.Size.Y < 0.1 and d.Size.Z < 0.1 then
+                zeroSized = zeroSized + 1
+            end
+        end
+        nameCount[d.Name] = (nameCount[d.Name] or 0) + 1
+    end
+
+    for name, c in pairs(nameCount) do
+        if c >= 10 then
+            table.insert(duplicateNames, {name = name, count = c})
+        end
+    end
+    table.sort(duplicateNames, function(a, b) return a.count > b.count end)
+
+    return {
+        transparentInvisibleParts = transparentInvisible,
+        zeroSizedParts = zeroSized,
+        topDuplicateNames = duplicateNames,
+        suggestion = (transparentInvisible + zeroSized > 0)
+            and "透明+不可視やゼロサイズのパーツを削除すると軽量化できます"
+            or "大きな最適化ポイントは見つかりませんでした",
+    }
+end
+
 -- ===== ポーリングループ =====
 
 local running = true
