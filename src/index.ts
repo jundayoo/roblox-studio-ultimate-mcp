@@ -12,7 +12,7 @@ import { join } from "path";
 // ===== Config =====
 const CONFIG = {
   protocolVersion: 2,
-  serverVersion: "5.1.0",
+  serverVersion: "5.1.1",
   port: 3002,
   host: "127.0.0.1",
   commandTimeoutMs: 30_000,
@@ -379,6 +379,7 @@ registerTool("bulkUpdate", "複数インスタンスのプロパティを一括�
     path: z.string(),
     props: z.record(z.string(), z.any()),
   })).describe("[{path, props: {propName: value}}, ...]"),
+  atomic: z.boolean().optional().describe("true なら部分失敗で全取消"),
 });
 
 registerTool("snapshot", "Workspace ツリーのスナップショットを保存", {
@@ -392,6 +393,10 @@ registerTool("diffFromSnapshot", "スナップショットからの差分検出"
 });
 
 registerTool("listSnapshots", "保存済みスナップショット一覧", {});
+
+registerTool("deleteSnapshot", "スナップショット削除", {
+  label: z.string().describe("削除するスナップショット名"),
+});
 
 registerTool("previewSetScript", "setScript の差分プレビュー（書き込みなし）", {
   path: z.string().describe("スクリプトのパス"),
@@ -452,12 +457,20 @@ registerTool("suggestModelOptimizations", "モデル最適化提案（削除は�
 
 // ----- v5.1 -----
 
-registerTool("undoLastMcpChange", "直近のMCP変更をN回巻き戻し（ChangeHistoryService）", {
-  count: z.number().optional().describe("巻き戻し回数（省略1）"),
+registerTool("undoLast", "直近の編集履歴を N 回 Undo (MCP/手動操作ともに対象)", {
+  count: z.number().optional().describe("Undo回数（省略1）"),
 });
 
-registerTool("redoLastMcpChange", "巻き戻し取消（Redo）をN回", {
+registerTool("redoLast", "Redoを N 回", {
   count: z.number().optional().describe("Redo回数（省略1）"),
+});
+
+// 旧名前も互換のため残す (deprecated)
+registerTool("undoLastMcpChange", "[DEPRECATED] undoLast を使ってください", {
+  count: z.number().optional(),
+});
+registerTool("redoLastMcpChange", "[DEPRECATED] redoLast を使ってください", {
+  count: z.number().optional(),
 });
 
 registerTool("generateUIFromSpec", "JSONからScreenGui構造を自動生成", {
@@ -466,6 +479,9 @@ registerTool("generateUIFromSpec", "JSONからScreenGui構造を自動生成", {
 });
 
 // Recording: クライアント（このMCP）側で記録
+// Recording 上限
+const MAX_RECORDINGS = 20;
+
 server.tool(
   "startRecording",
   "今後のMCPコマンドを記録開始",
@@ -473,9 +489,38 @@ server.tool(
     label: z.string().describe("記録名"),
   },
   (async ({ label }: { label: string }) => {
+    if (currentRecording) {
+      return {
+        content: [{
+          type: "text" as const,
+          text: JSON.stringify({
+            error: `Already recording: ${currentRecording}`,
+            hint: "call stopRecording first",
+          }, null, 2),
+        }],
+      };
+    }
+    // 上限超え古いやつから削除
+    if (recordings.size >= MAX_RECORDINGS) {
+      const oldest = Array.from(recordings.keys())[0];
+      if (oldest) recordings.delete(oldest);
+    }
     recordings.set(label, []);
     currentRecording = label;
     return { content: [{ type: "text" as const, text: JSON.stringify({ success: true, label }, null, 2) }] };
+  }) as any
+);
+
+server.tool(
+  "deleteRecording",
+  "記録を削除",
+  {
+    label: z.string().describe("記録名"),
+  },
+  (async ({ label }: { label: string }) => {
+    const existed = recordings.delete(label);
+    if (currentRecording === label) currentRecording = null;
+    return { content: [{ type: "text" as const, text: JSON.stringify({ success: existed }, null, 2) }] };
   }) as any
 );
 
@@ -506,21 +551,66 @@ server.tool(
   }) as any
 );
 
+// 破壊的ツールリスト（replay時に confirm 必須）
+const DESTRUCTIVE_TOOLS = new Set([
+  "setScript", "editScript", "insertCode", "removeLines", "replaceInScript",
+  "deleteInstance", "renameInstance", "moveInstance",
+  "setProperty", "setProperties", "setAttribute", "bulkUpdate",
+  "createInstance", "cloneInstance", "restoreBackup",
+  "setPartCollisionGroup", "createCollisionGroup", "setCollisionGroupCollidable",
+  "generateUIFromSpec", "undoLast", "redoLast", "undoLastMcpChange", "redoLastMcpChange",
+]);
+
 server.tool(
   "replayRecording",
-  "記録を再生（全コマンドを順に送信）",
+  "記録を再生（dryRunで事前確認、confirm=trueで実行）",
   {
     label: z.string().describe("記録名"),
+    dryRun: z.boolean().optional().describe("true=送信せず内容だけ返す (default true)"),
+    confirm: z.boolean().optional().describe("破壊的ツール含む場合は true 必須"),
   },
-  (async ({ label }: { label: string }) => {
+  (async ({ label, dryRun, confirm }: { label: string; dryRun?: boolean; confirm?: boolean }) => {
     const recording = recordings.get(label);
     if (!recording) {
       return { content: [{ type: "text" as const, text: JSON.stringify({ error: "not found: " + label }, null, 2) }] };
     }
+
+    const isDryRun = dryRun !== false; // デフォルト true (safe)
+    const destructive = recording.filter((s) => DESTRUCTIVE_TOOLS.has(s.name));
+
+    if (isDryRun) {
+      return {
+        content: [{
+          type: "text" as const,
+          text: JSON.stringify({
+            label,
+            stepCount: recording.length,
+            destructiveCount: destructive.length,
+            destructiveSteps: destructive.map((s) => s.name),
+            summary: recording.map((s) => s.name),
+            hint: "dryRun:false + confirm:true で実行",
+          }, null, 2),
+        }],
+      };
+    }
+
+    if (destructive.length > 0 && !confirm) {
+      return {
+        content: [{
+          type: "text" as const,
+          text: JSON.stringify({
+            error: `${destructive.length} destructive tool calls in recording`,
+            hint: "pass confirm:true to proceed",
+            destructiveSteps: destructive.map((s) => s.name),
+          }, null, 2),
+        }],
+      };
+    }
+
     const results: any[] = [];
     for (const step of recording) {
       try {
-        const r = await sendCommand(step.name, step.params);
+        await sendCommand(step.name, step.params);
         results.push({ step: step.name, ok: true });
       } catch (e: any) {
         results.push({ step: step.name, ok: false, error: e.message });

@@ -11,7 +11,7 @@
     - Version handshake
 ]]
 
-local PLUGIN_VERSION = "4.0.0"
+local PLUGIN_VERSION = "5.1.1"
 local PROTOCOL_VERSION = 2
 
 local HttpService = game:GetService("HttpService")
@@ -76,9 +76,15 @@ local function typeToLevel(mt)
     return "output"
 end
 
+local MAX_LOG_MSG_LEN = 8192
+
 LogService.MessageOut:Connect(function(message, messageType)
+    local safeMsg = tostring(message)
+    if #safeMsg > MAX_LOG_MSG_LEN then
+        safeMsg = safeMsg:sub(1, MAX_LOG_MSG_LEN) .. "...[truncated]"
+    end
     table.insert(logBuffer, {
-        message = message,
+        message = safeMsg,
         level = typeToLevel(messageType),
         type = tostring(messageType),
         time = os.time(),
@@ -1108,12 +1114,21 @@ handlers.getScriptSummary = function(params)
     }
 end
 
+local function isProtected(instance)
+    if instance == game then return true end
+    return instance.Parent == game and PROTECTED_SERVICES[instance.Name]
+end
+
 -- リネーム
 handlers.renameInstance = writeGuarded(function(params)
     local instance = getInstanceByPath(params.path)
     if not instance then return {error = "Instance not found"} end
+    if isProtected(instance) then
+        return {error = "Refusing to rename protected service: " .. instance.Name}
+    end
     local oldName = instance.Name
-    instance.Name = params.newName
+    local ok, err = pcall(function() instance.Name = params.newName end)
+    if not ok then return {error = tostring(err)} end
     ChangeHistoryService:SetWaypoint("MCP: Renamed " .. oldName .. " -> " .. params.newName)
     return {success = true, oldName = oldName, newName = params.newName, newPath = getPathOfInstance(instance)}
 end)
@@ -1122,9 +1137,13 @@ end)
 handlers.moveInstance = writeGuarded(function(params)
     local instance = getInstanceByPath(params.path)
     if not instance then return {error = "Instance not found"} end
+    if isProtected(instance) then
+        return {error = "Refusing to move protected service: " .. instance.Name}
+    end
     local newParent = getInstanceByPath(params.newParent)
     if not newParent then return {error = "New parent not found"} end
-    instance.Parent = newParent
+    local ok, err = pcall(function() instance.Parent = newParent end)
+    if not ok then return {error = tostring(err)} end
     ChangeHistoryService:SetWaypoint("MCP: Moved " .. instance.Name)
     return {success = true, newPath = getPathOfInstance(instance)}
 end)
@@ -1218,12 +1237,22 @@ handlers.bulkUpdate = writeGuarded(function(params)
     end
 
     if recordOk and recordId then
-        pcall(function() ChangeHistoryService:FinishRecording(recordId, Enum.FinishRecordingOperation.Commit) end)
+        -- atomic=true なら部分失敗で全取消
+        local finishOp = (params.atomic and #failed > 0)
+            and Enum.FinishRecordingOperation.Cancel
+            or Enum.FinishRecordingOperation.Commit
+        pcall(function() ChangeHistoryService:FinishRecording(recordId, finishOp) end)
     else
         ChangeHistoryService:SetWaypoint("MCP: Bulk Update")
     end
 
-    return {success = success, failed = failed, failCount = #failed}
+    return {
+        success = success,
+        failed = failed,
+        failCount = #failed,
+        atomic = params.atomic == true,
+        cancelled = params.atomic == true and #failed > 0,
+    }
 end)
 
 -- Workspace のスナップショット（diff 用）
@@ -1315,6 +1344,34 @@ handlers.listSnapshots = function()
     return {snapshots = list, count = #list}
 end
 
+handlers.deleteSnapshot = function(params)
+    if not params.label then return {error = "label required"} end
+    if snapshots[params.label] then
+        snapshots[params.label] = nil
+        return {success = true, deleted = params.label}
+    end
+    return {error = "No snapshot with label: " .. params.label}
+end
+
+-- スナップショット数の上限（古いのから削除）
+local MAX_SNAPSHOTS = 20
+local originalSnapshot = handlers.snapshot
+handlers.snapshot = function(params)
+    local res = originalSnapshot(params)
+    -- 上限超えたら古い順に削除
+    local entries = {}
+    for k, v in pairs(snapshots) do
+        table.insert(entries, {label = k, time = v.time})
+    end
+    if #entries > MAX_SNAPSHOTS then
+        table.sort(entries, function(a, b) return a.time < b.time end)
+        for i = 1, #entries - MAX_SNAPSHOTS do
+            snapshots[entries[i].label] = nil
+        end
+    end
+    return res
+end
+
 -- setScript プレビュー (diff表示、書き込みなし)
 handlers.previewSetScript = function(params)
     local instance = getInstanceByPath(params.path)
@@ -1376,7 +1433,18 @@ local function hookRemote(rem)
     end
 end
 
+-- 新規 RemoteEvent を自動フック（起動時に1回接続）
+local remoteAutoHookConnected = false
+local function ensureRemoteAutoHook()
+    if remoteAutoHookConnected then return end
+    remoteAutoHookConnected = true
+    game.DescendantAdded:Connect(function(d)
+        if d:IsA("RemoteEvent") then hookRemote(d) end
+    end)
+end
+
 handlers.inspectRemoteEvents = function(params)
+    ensureRemoteAutoHook()
     -- 既存 RemoteEvent を全部フック
     for _, d in ipairs(game:GetDescendants()) do
         if d:IsA("RemoteEvent") then hookRemote(d) end
@@ -1460,9 +1528,13 @@ handlers.measureBounds = function(params)
     }
 end
 
--- 複数コード連続実行
+-- 複数コード連続実行（上限あり）
+local MAX_BATCH_SNIPPETS = 50
 handlers.batchRunCode = function(params)
     local snippets = params.snippets or {}
+    if #snippets > MAX_BATCH_SNIPPETS then
+        return {error = "Too many snippets: " .. #snippets .. " > " .. MAX_BATCH_SNIPPETS}
+    end
     local results = {}
     for i, code in ipairs(snippets) do
         local ok, res = pcall(handlers.runCode, {code = code})
@@ -1646,18 +1718,19 @@ end
 
 -- ===== v5.1 =====
 
--- MCP の変更を巻き戻し（連続undo）
-handlers.undoLastMcpChange = writeGuarded(function(params)
+-- 直近の変更を N 回 Undo/Redo (ユーザー操作も対象になることに注意)
+handlers.undoLast = writeGuarded(function(params)
     local count = tonumber(params.count) or 1
     local undone = 0
     for i = 1, count do
         local ok = pcall(function() ChangeHistoryService:Undo() end)
         if ok then undone = undone + 1 else break end
     end
-    return {success = true, undone = undone}
+    return {success = true, undone = undone,
+        note = "ChangeHistoryService:Undo() は最後の Waypoint を1つ戻します。ユーザー手動操作も対象になります"}
 end)
 
-handlers.redoLastMcpChange = writeGuarded(function(params)
+handlers.redoLast = writeGuarded(function(params)
     local count = tonumber(params.count) or 1
     local redone = 0
     for i = 1, count do
@@ -1667,10 +1740,29 @@ handlers.redoLastMcpChange = writeGuarded(function(params)
     return {success = true, redone = redone}
 end)
 
--- JSON からGUI生成（簡易ReactのようなUI構築）
--- spec: {type="Frame", props={Size=...}, children={...}}
+-- 旧名前も互換のため残す (deprecated)
+handlers.undoLastMcpChange = handlers.undoLast
+handlers.redoLastMcpChange = handlers.redoLast
+
+-- JSON からGUI生成（UI系クラスのみホワイトリスト）
+local ALLOWED_UI_CLASSES = {
+    ScreenGui = true, SurfaceGui = true, BillboardGui = true,
+    Frame = true, ScrollingFrame = true, ViewportFrame = true,
+    TextLabel = true, TextButton = true, TextBox = true,
+    ImageLabel = true, ImageButton = true,
+    CanvasGroup = true, VideoFrame = true,
+    UICorner = true, UIStroke = true, UIGradient = true, UIPadding = true,
+    UIListLayout = true, UIGridLayout = true, UITableLayout = true, UIPageLayout = true,
+    UISizeConstraint = true, UIAspectRatioConstraint = true, UITextSizeConstraint = true,
+    UIScale = true, UIFlexItem = true,
+    Folder = true,  -- UI のグルーピング用
+}
+
 local function buildUI(spec, parent)
     if type(spec) ~= "table" or not spec.type then return nil, "spec must have type" end
+    if not ALLOWED_UI_CLASSES[spec.type] then
+        return nil, "disallowed class: " .. tostring(spec.type) .. " (UI系のみ許可)"
+    end
     local ok, instance = pcall(Instance.new, spec.type)
     if not ok then return nil, "Failed to create " .. tostring(spec.type) end
 
@@ -1720,6 +1812,14 @@ end
 handlers.generateUIFromSpec = writeGuarded(function(params)
     local parent = getInstanceByPath(params.parent or "game.StarterGui")
     if not parent then return {error = "Parent not found"} end
+    -- UI系への配置に限定
+    local parentOK = parent:IsA("StarterGui") or parent:IsA("PlayerGui")
+        or parent:IsA("GuiObject") or parent:IsA("LayerCollector")
+        or parent:IsA("SurfaceGui") or parent:IsA("BillboardGui")
+        or parent == game:GetService("StarterGui")
+    if not parentOK then
+        return {error = "Parent must be a GUI container (StarterGui/ScreenGui/GuiObject/SurfaceGui/BillboardGui)"}
+    end
     local spec = params.spec
     if type(spec) ~= "table" then return {error = "spec must be a table"} end
 
@@ -1780,17 +1880,24 @@ local function pollServer()
                     result = {error = "Unknown command: " .. data.command}
                 end
 
-                pcall(function()
-                    HttpService:RequestAsync({
-                        Url = MCP_SERVER_URL .. "/result",
-                        Method = "POST",
-                        Headers = {["Content-Type"] = "application/json"},
-                        Body = HttpService:JSONEncode({
-                            id = data.id,
-                            result = result,
-                        }),
-                    })
-                end)
+                -- /result POST はリトライ付き (最大3回)
+                local body = HttpService:JSONEncode({id = data.id, result = result})
+                local delivered = false
+                for attempt = 1, 3 do
+                    local postOk = pcall(function()
+                        HttpService:RequestAsync({
+                            Url = MCP_SERVER_URL .. "/result",
+                            Method = "POST",
+                            Headers = {["Content-Type"] = "application/json"},
+                            Body = body,
+                        })
+                    end)
+                    if postOk then delivered = true; break end
+                    task.wait(0.2 * attempt)
+                end
+                if not delivered then
+                    warn("[MCP] Failed to deliver result for id " .. tostring(data.id))
+                end
             end
         else
             consecutiveFailures = consecutiveFailures + 1
