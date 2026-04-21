@@ -11,7 +11,7 @@
     - Version handshake
 ]]
 
-local PLUGIN_VERSION = "5.1.1"
+local PLUGIN_VERSION = "5.2.0"
 local PROTOCOL_VERSION = 2
 
 local HttpService = game:GetService("HttpService")
@@ -1839,6 +1839,133 @@ handlers.generateUIFromSpec = writeGuarded(function(params)
         totalInstances = countDesc(instance),
     }
 end)
+
+-- ===== v5.2 デバッグヘルパー =====
+
+-- 透明 + CanCollide=true な Part を列挙（"透明の壁" の発見用）
+handlers.findInvisibleObstacles = function(params)
+    local root = params.root and getInstanceByPath(params.root) or workspace
+    if not root then return {error = "Root not found"} end
+    local transparencyThreshold = params.transparencyThreshold or 0.9
+    local limit = params.limit or 50
+
+    local found = {}
+    for _, d in ipairs(root:GetDescendants()) do
+        if d:IsA("BasePart") and d.CanCollide and d.Transparency >= transparencyThreshold then
+            table.insert(found, {
+                path = getPathOfInstance(d),
+                name = d.Name,
+                className = d.ClassName,
+                pos = tostring(d.Position),
+                size = tostring(d.Size),
+                transparency = d.Transparency,
+            })
+        end
+    end
+    if #found > limit then
+        for i = limit + 1, #found do found[i] = nil end
+    end
+    return {results = found, count = #found, threshold = transparencyThreshold}
+end
+
+-- プレイヤーが引っかかってる原因を診断（位置 + 4方向 raycast + 触れてるパーツ）
+handlers.diagnoseStuckCharacter = function(params)
+    local Players = game:GetService("Players")
+    local playerName = params.playerName
+    local player = playerName and Players:FindFirstChild(playerName) or Players:GetPlayers()[1]
+    if not player then return {error = "No player found"} end
+    local char = player.Character
+    if not char then return {error = "Character not found"} end
+    local hrp = char:FindFirstChild("HumanoidRootPart")
+    if not hrp then return {error = "HumanoidRootPart not found"} end
+
+    local pos = hrp.Position
+    local params_ = RaycastParams.new()
+    params_.FilterType = Enum.RaycastFilterType.Exclude
+    params_.FilterDescendantsInstances = {char}
+
+    local function cast(dirName, dirVec)
+        local rr = workspace:Raycast(pos, dirVec, params_)
+        if rr then
+            local p = rr.Instance
+            local path = getPathOfInstance(p)
+            return {
+                dir = dirName,
+                hit = path,
+                className = p.ClassName,
+                dist = (rr.Position - pos).Magnitude,
+                canCollide = p.CanCollide,
+                transparency = p.Transparency,
+            }
+        end
+        return {dir = dirName, clear = true}
+    end
+
+    local look = hrp.CFrame.LookVector
+    local right = hrp.CFrame.RightVector
+
+    -- 触れてるパーツ (Touching)
+    local touching = {}
+    local ok = pcall(function()
+        for _, p in ipairs(hrp:GetTouchingParts()) do
+            table.insert(touching, {
+                path = getPathOfInstance(p),
+                name = p.Name,
+                canCollide = p.CanCollide,
+                transparency = p.Transparency,
+            })
+        end
+    end)
+
+    return {
+        playerName = player.Name,
+        position = tostring(pos),
+        velocity = tostring(hrp.AssemblyLinearVelocity),
+        casts = {
+            cast("forward", look * 6),
+            cast("back", -look * 6),
+            cast("right", right * 6),
+            cast("left", -right * 6),
+            cast("up", Vector3.new(0, 6, 0)),
+            cast("down", Vector3.new(0, -6, 0)),
+        },
+        touching = touching,
+        touchingCount = #touching,
+    }
+end
+
+-- GameConfig.WEAPONS から武器バランスレポート生成
+handlers.balanceReport = function(params)
+    local RS = game:GetService("ReplicatedStorage")
+    local ok, Config = pcall(function() return require(RS.Modules.GameConfig) end)
+    if not ok or not Config or not Config.WEAPONS then
+        return {error = "Cannot load GameConfig or WEAPONS missing"}
+    end
+
+    local hp = Config.MAX_HP or 100
+    local report = {}
+    for id, w in pairs(Config.WEAPONS) do
+        local damagePerShot = (w.damage or 0) * (w.pellets or 1)
+        local dps = damagePerShot / math.max(0.001, w.fireRate or 0.1)
+        local ttk = hp / dps
+        table.insert(report, {
+            id = id,
+            name = w.name or id,
+            damage = w.damage,
+            pellets = w.pellets or 1,
+            damagePerShot = damagePerShot,
+            fireRate = w.fireRate,
+            dps = math.floor(dps * 10) / 10,
+            ttk = math.floor(ttk * 100) / 100,
+            range = w.range,
+            magSize = w.magSize,
+            auto = w.auto or false,
+            bulletSpeed = w.bulletSpeed,
+        })
+    end
+    table.sort(report, function(a, b) return a.dps > b.dps end)
+    return {weapons = report, maxHP = hp, count = #report}
+end
 
 -- ===== ポーリングループ =====
 

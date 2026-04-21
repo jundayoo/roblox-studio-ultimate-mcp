@@ -12,7 +12,7 @@ import { join } from "path";
 // ===== Config =====
 const CONFIG = {
   protocolVersion: 2,
-  serverVersion: "5.1.1",
+  serverVersion: "5.2.0",
   port: 3002,
   host: "127.0.0.1",
   commandTimeoutMs: 30_000,
@@ -120,6 +120,35 @@ const server = new McpServer({
 const recordings: Map<string, Array<{ name: string; params: any; time: number }>> = new Map();
 let currentRecording: string | null = null;
 
+// ===== AutoStopPlay (v5.2) =====
+// Play 中に編集失敗したら osascript で Stop キー送信し 1 度だけ再試行
+async function autoStopPlay(): Promise<void> {
+  try {
+    await new Promise<void>((resolve, reject) => {
+      execFile("osascript", [
+        "-e", `tell application "RobloxStudio" to activate`,
+      ], (err) => (err ? reject(err) : resolve()));
+    });
+    await new Promise((r) => setTimeout(r, 150));
+    // Shift+F5 = Stop
+    await new Promise<void>((resolve, reject) => {
+      execFile("osascript", [
+        "-e", `tell application "System Events" to key code 96 using {shift down}`,
+      ], (err) => (err ? reject(err) : resolve()));
+    });
+    // Play -> Edit 遷移の余裕
+    await new Promise((r) => setTimeout(r, 800));
+  } catch (e) {
+    // 失敗しても続行（手動で止めて再試行してもらう）
+  }
+}
+
+function isPlayModeError(result: any): boolean {
+  if (!result || typeof result !== "object") return false;
+  const msg = result.error;
+  return typeof msg === "string" && msg.indexOf("Cannot edit scripts during Play mode") >= 0;
+}
+
 // ツール登録ヘルパー
 function registerTool(
   name: string,
@@ -132,7 +161,17 @@ function registerTool(
       const arr = recordings.get(currentRecording);
       if (arr) arr.push({ name, params, time: Date.now() });
     }
-    const result = await sendCommand(name, params);
+    let result = await sendCommand(name, params);
+
+    // autoStopPlay: Play モードエラー時に自動停止して1度だけ再試行
+    if (isPlayModeError(result)) {
+      await autoStopPlay();
+      result = await sendCommand(name, params);
+      if (result && typeof result === "object") {
+        result.__autoStopPlayTriggered = true;
+      }
+    }
+
     let text = JSON.stringify(result, null, 2);
     if (text.length > CONFIG.responseMaxBytes) {
       text = text.slice(0, CONFIG.responseMaxBytes) + "\n...[TRUNCATED]";
@@ -454,6 +493,20 @@ registerTool("getPerformanceStats", "FPS/メモリ/ネットワークなどパ�
 registerTool("suggestModelOptimizations", "モデル最適化提案（削除はしない）", {
   path: z.string().optional().describe("検査ルート（省略 game.Workspace）"),
 });
+
+// ----- v5.2 デバッグヘルパー -----
+
+registerTool("findInvisibleObstacles", "透明+CanCollide=true な Part を列挙（透明の壁探し）", {
+  root: z.string().optional().describe("検索ルート（省略 workspace）"),
+  transparencyThreshold: z.number().optional().describe("透明度の閾値（省略 0.9）"),
+  limit: z.number().optional().describe("最大件数"),
+});
+
+registerTool("diagnoseStuckCharacter", "プレイヤーの位置/周辺ray/触れパーツを診断", {
+  playerName: z.string().optional().describe("省略で1番目のプレイヤー"),
+});
+
+registerTool("balanceReport", "GameConfig.WEAPONS の武器バランスを計算（DPS/TTK）", {});
 
 // ----- v5.1 -----
 
