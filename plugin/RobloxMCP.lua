@@ -1937,9 +1937,17 @@ end
 -- GameConfig.WEAPONS から武器バランスレポート生成
 handlers.balanceReport = function(params)
     local RS = game:GetService("ReplicatedStorage")
-    local ok, Config = pcall(function() return require(RS.Modules.GameConfig) end)
+    -- require はキャッシュされるので、Source を直接 loadstring で eval
+    local configPath = params.configPath or "game.ReplicatedStorage.Modules.GameConfig"
+    local cfgInstance = getInstanceByPath(configPath)
+    if not cfgInstance or not cfgInstance:IsA("ModuleScript") then
+        return {error = "GameConfig not found at " .. configPath}
+    end
+    local loaderFn, err = loadstring(cfgInstance.Source)
+    if not loaderFn then return {error = "Failed to load GameConfig: " .. tostring(err)} end
+    local ok, Config = pcall(loaderFn)
     if not ok or not Config or not Config.WEAPONS then
-        return {error = "Cannot load GameConfig or WEAPONS missing"}
+        return {error = "Cannot eval GameConfig or WEAPONS missing"}
     end
 
     local hp = Config.MAX_HP or 100
