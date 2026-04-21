@@ -1943,28 +1943,83 @@ handlers.balanceReport = function(params)
     end
 
     local hp = Config.MAX_HP or 100
+
+    -- 最大値（正規化用）
+    local maxRange = 0
+    local maxBulletSpeed = 0
+    for _, w in pairs(Config.WEAPONS) do
+        if (w.range or 0) > maxRange then maxRange = w.range end
+        if (w.bulletSpeed or 0) > maxBulletSpeed then maxBulletSpeed = w.bulletSpeed end
+    end
+    if maxRange == 0 then maxRange = 1 end
+    if maxBulletSpeed == 0 then maxBulletSpeed = 1 end
+
     local report = {}
     for id, w in pairs(Config.WEAPONS) do
         local damagePerShot = (w.damage or 0) * (w.pellets or 1)
-        local dps = damagePerShot / math.max(0.001, w.fireRate or 0.1)
+        local fireRate = math.max(0.001, w.fireRate or 0.1)
+        local dps = damagePerShot / fireRate
         local ttk = hp / dps
+
+        -- 持続DPS: reload 時間含むマガジンサイクル
+        local magSize = w.magSize or 30
+        local reloadTime = w.reloadTime or 2
+        local cycleTime = magSize * fireRate + reloadTime
+        local sustainDps = (damagePerShot * magSize) / cycleTime
+
+        -- 射程スコア 0-1
+        local rangeScore = (w.range or 0) / maxRange
+        -- 弾速スコア 0-1
+        local bulletSpeedScore = (w.bulletSpeed or 0) / maxBulletSpeed
+        -- 命中スコア: spread 0 なら 1.0、0.3 以上なら 0.2（指数減衰近似）
+        local spread = w.spread or 0
+        local accuracyScore = math.max(0.2, 1 - spread * 2.5)
+        -- マガジン効率スコア (高いほど連射性能)
+        local magScore = math.min(1, magSize / 30)
+
+        -- 総合スコア: 重み付き平均（持続DPSを中心に）
+        -- 0-1 正規化した sustain (最大300で)
+        local sustainNorm = math.min(1, sustainDps / 300)
+        local overall = (
+            sustainNorm * 0.40 +
+            rangeScore * 0.20 +
+            bulletSpeedScore * 0.15 +
+            accuracyScore * 0.15 +
+            magScore * 0.10
+        ) * 100  -- 0-100 スケール
+
         table.insert(report, {
             id = id,
             name = w.name or id,
             damage = w.damage,
             pellets = w.pellets or 1,
             damagePerShot = damagePerShot,
-            fireRate = w.fireRate,
+            fireRate = fireRate,
             dps = math.floor(dps * 10) / 10,
+            sustainDps = math.floor(sustainDps * 10) / 10,
             ttk = math.floor(ttk * 100) / 100,
             range = w.range,
-            magSize = w.magSize,
+            magSize = magSize,
+            reloadTime = reloadTime,
             auto = w.auto or false,
             bulletSpeed = w.bulletSpeed,
+            spread = spread,
+            scores = {
+                range = math.floor(rangeScore * 100) / 100,
+                bulletSpeed = math.floor(bulletSpeedScore * 100) / 100,
+                accuracy = math.floor(accuracyScore * 100) / 100,
+                magazine = math.floor(magScore * 100) / 100,
+            },
+            overallScore = math.floor(overall * 10) / 10,
         })
     end
-    table.sort(report, function(a, b) return a.dps > b.dps end)
-    return {weapons = report, maxHP = hp, count = #report}
+    table.sort(report, function(a, b) return a.overallScore > b.overallScore end)
+    return {
+        weapons = report,
+        maxHP = hp,
+        count = #report,
+        formula = "overall = sustainDps(40%) + range(20%) + bulletSpeed(15%) + accuracy(15%) + magazine(10%)",
+    }
 end
 
 -- ===== ポーリングループ =====
