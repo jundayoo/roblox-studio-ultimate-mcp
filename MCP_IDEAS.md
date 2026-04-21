@@ -18,15 +18,11 @@
 **効果**: 原子的に検索→編集できる
 **難易度**: 小
 
-### 🆕 `autoStopPlay: true` オプション
-**痛点**: Play中に editScript 送ると「Play停止して」と失敗する。ユーザーに言ってもらうまで待ち時間
-**効果**: Play中なら自動で Stop してから実行
-**難易度**: 小〜中（osascript で停止制御可能）
+### ✅ `autoStopPlay: true` オプション (v5.2)
+registerTool wrapper が Play モードエラーを検知したら osascript で Stop→再試行
 
-### 🆕 `findInvisibleObstacles()`
-**痛点**: 透明で CanCollide=true な Part（今日の MainSpawn みたいなの）を手書きループで毎回探してた
-**効果**: 常用コマンド化。CanCollide=true かつ Transparency>0.9 な Part をリスト
-**難易度**: 小
+### ✅ `findInvisibleObstacles()` (v5.2)
+透明 + CanCollide=true な Part を列挙する
 
 ### 🆕 `summarizeGui(path)`
 **痛点**: ScreenGui のツリー構造と各要素のサイズ/位置をまとめて見たい時、手書き
@@ -38,20 +34,16 @@
 **効果**: Plugin が Selection 変更を自動 Push、MCP 側で「今ユーザーが選んでるのはこれ」と分かる
 **難易度**: 中（常時接続的な仕組み必要）
 
-### 🆕 `diagnoseStuckCharacter(playerName)`
-**痛点**: 「動かない」「透明の壁」系の問題で、毎回 DebugPos スクリプトを仕込んで runCode で起動
-**効果**: 1コマンドでプレイヤー位置・前後左右 raycast・触れてるパーツをまとめて返す
-**難易度**: 小
+### ✅ `diagnoseStuckCharacter(playerName)` (v5.2)
+プレイヤーの位置 / 6方向raycast / 触れてるパーツ を一発で返す
 
 ### 🆕 `hotReloadScript(path)`
 **痛点**: スクリプト書換後、Play 中はロールバックされるので毎回 Stop→Play
 **効果**: Edit モードで編集済スクリプトを手動で reload（Script.Disabled 切替で近似）
 **難易度**: 小
 
-### 🆕 `balanceReport()`
-**痛点**: 武器バランスを手計算（TTK、DPS）してた
-**効果**: GameConfig.WEAPONS から全武器の DPS / TTK / 1発キル距離を計算して表で返す
-**難易度**: 小（ゲーム固有だが汎用化可能）
+### ✅ `balanceReport()` (v5.2)
+GameConfig.WEAPONS の武器全部の DPS/TTK 自動計算
 
 ### 🆕 `profileRunCode(code)`
 **痛点**: `runCode` が遅い時、どこが重いか分からない
